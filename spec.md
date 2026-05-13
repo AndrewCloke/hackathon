@@ -127,7 +127,11 @@ The CLI accepts `--no-cache` to bypass all caches and `--refresh` to force OVAL 
 
 ## OVAL → binary package mapping
 
-OVAL's `dpkginfo_object` does not store the binary package name directly. The lookup is:
+OVAL's definitions use two different shapes depending on whether the CVE affects userspace packages or the kernel.
+
+### Userspace CVEs (e.g. CVE-2024-6387)
+
+`dpkginfo_object` does not store the binary package name directly. The lookup is:
 
 ```
 definition (CVE-2024-6387)
@@ -148,7 +152,33 @@ definition (CVE-2024-6387)
 
 So one criterion yields a `FixRequirement(binaries=[...], fixed_version="...")`. A definition may have multiple criterions (e.g. several source packages, or a `criteria operator="OR"` over alternatives); a manifest "contains the fix" iff every requirement is satisfied: for each requirement, every installed binary in the list is at `>= fixed_version`. Binaries not installed in the manifest don't block the fix (they simply aren't on the image).
 
-This is the conservative reading. Definitions with nested `AND`/`NOT` semantics (uncommon for Ubuntu CVE OVAL) would be evaluated as if all leaves had to be fixed, which never produces a false-positive answer but could push the boundary later than strictly required.
+### Kernel CVEs (e.g. CVE-2026-23268)
+
+Kernel CVEs use a completely different structure. The criterions reference `uname_test` (runtime "is kernel X running?" checks) and `variable_test` (version comparison against the running kernel version) — **not** `dpkginfo_test`. The `variable_test` has no structured link back to a source-package name; the only place the flavour appears is the criterion's `comment` attribute:
+
+```xml
+<criterion test_ref="oval:com.ubuntu.noble:tst:2025402460000050"
+           comment="linux-gcp-6.17 package in noble was vulnerable but has been fixed (note: '6.17.0-1009.9~24.04.3')." />
+```
+
+The parser matches that comment with the regex
+`^(?P<pkg>\S+) package in noble was vulnerable but has been fixed \(note: '(?P<ver>[^']+)'\)` and produces a kernel `FixRequirement`. Criterions without "has been fixed" (i.e. unfixed flavours, runtime-only `uname_test`) are skipped.
+
+#### Series-aware manifest matching
+
+GCP image manifests don't contain the OVAL source name `linux-gcp-6.17` directly — they contain the meta-package `linux-gcp` at a version like `6.17.0-1013.13~24.04.1`. The matcher therefore:
+
+1. **Direct match** — if the OVAL flavour name (e.g. `linux-gcp`) is itself a binary in the manifest, compare its installed version against the fix.
+2. **Series fallback** — if the OVAL flavour ends in `-X.Y` (e.g. `linux-gcp-6.17`), split into `stem`+`series`. If the manifest has the stem at a version whose upstream part begins with `X.Y.`, treat that as the install of that HWE series.
+3. **Not applicable** — if neither matches, the flavour isn't carried by this image; the requirement is silently satisfied (the vulnerable kernel simply isn't installed).
+
+A manifest "contains the fix" iff every applicable requirement is satisfied. Inapplicable requirements (flavour not installed) never block.
+
+### Caveats
+
+- This is the conservative reading. Definitions with nested `AND`/`NOT` semantics (uncommon for Ubuntu CVE OVAL) are evaluated as if all leaves had to be fixed, which never produces a false-positive but could push the boundary later than strictly required.
+- A CVE whose only "has been fixed" entries are for flavours not present in any GCP image manifest (e.g. CVE-2024-1086, fixed only for `linux-raspi-realtime`) yields exit 3 — the CVE simply doesn't affect this image lineage.
+- The criterion-comment parsing is a soft dependency on Canonical's OVAL generator wording. If they reword the "was vulnerable but has been fixed" boilerplate, the kernel path silently degrades to "no fix recorded" — surface this with `--verbose` if a kernel-CVE result looks wrong.
 
 ## Open Questions / Assumptions
 
