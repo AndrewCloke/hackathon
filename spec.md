@@ -164,6 +164,19 @@ Kernel CVEs use a completely different structure. The criterions reference `unam
 The parser matches that comment with the regex
 `^(?P<pkg>\S+) package in noble was vulnerable but has been fixed \(note: '(?P<ver>[^']+)'\)` and produces a kernel `FixRequirement`. Criterions without "has been fixed" (i.e. unfixed flavours, runtime-only `uname_test`) are skipped.
 
+#### Filtering to GCP-relevant flavours
+
+A typical kernel CVE definition lists 15–20 flavours (`linux`, `linux-aws`, `linux-azure`, `linux-gcp`, `linux-gke`, `linux-hwe-6.17`, `linux-oracle`, `linux-raspi`, …) plus their HWE variants. GCP server images run **only `linux-gcp*` flavours** — the GA meta `linux-gcp` or HWE variants like `linux-gcp-6.17`. Other flavours are not installed and their CVE status is irrelevant to this question.
+
+The parser therefore filters kernel requirements to `flavour == "linux-gcp"` or `flavour.startswith("linux-gcp-")` before returning. Dropped flavours are recorded so the CLI can:
+
+- Show them under `--verbose` as a single "ignoring fix entries for non-GCP kernel flavours: …" line, and
+- Distinguish two empty-result cases:
+  - **No fixed entries at all in the feed** → exit 2 (`{cve} is known but has no fixed version recorded for Noble`)
+  - **Fixes exist but only for non-GCP flavours** → exit 3 (`{cve} has fixes only for non-GCP kernel flavours …; does not affect Noble GCP images`)
+
+CVE-2024-1086 is the canonical example of the second case: in the current feed its only `has been fixed` entry is for `linux-raspi-realtime`, so the tool reports exit 3.
+
 #### Series-aware manifest matching
 
 GCP image manifests don't contain the OVAL source name `linux-gcp-6.17` directly — they contain the meta-package `linux-gcp` at a version like `6.17.0-1013.13~24.04.1`. The matcher therefore:
@@ -172,13 +185,13 @@ GCP image manifests don't contain the OVAL source name `linux-gcp-6.17` directly
 2. **Series fallback** — if the OVAL flavour ends in `-X.Y` (e.g. `linux-gcp-6.17`), split into `stem`+`series`. If the manifest has the stem at a version whose upstream part begins with `X.Y.`, treat that as the install of that HWE series.
 3. **Not applicable** — if neither matches, the flavour isn't carried by this image; the requirement is silently satisfied (the vulnerable kernel simply isn't installed).
 
-A manifest "contains the fix" iff every applicable requirement is satisfied. Inapplicable requirements (flavour not installed) never block.
+A manifest "contains the fix" iff every applicable `linux-gcp*` requirement is satisfied. Inapplicable requirements (flavour not installed) never block.
 
 ### Caveats
 
 - This is the conservative reading. Definitions with nested `AND`/`NOT` semantics (uncommon for Ubuntu CVE OVAL) are evaluated as if all leaves had to be fixed, which never produces a false-positive but could push the boundary later than strictly required.
-- A CVE whose only "has been fixed" entries are for flavours not present in any GCP image manifest (e.g. CVE-2024-1086, fixed only for `linux-raspi-realtime`) yields exit 3 — the CVE simply doesn't affect this image lineage.
 - The criterion-comment parsing is a soft dependency on Canonical's OVAL generator wording. If they reword the "was vulnerable but has been fixed" boilerplate, the kernel path silently degrades to "no fix recorded" — surface this with `--verbose` if a kernel-CVE result looks wrong.
+- The `linux-gcp*` filter is hardcoded since this tool is GCP-only by design. Extending to other clouds would need to parameterize that prefix alongside the manifest bucket path.
 
 ## Open Questions / Assumptions
 
